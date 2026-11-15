@@ -1,0 +1,171 @@
+name: Release Archive
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则用日期，如 v2026.11.14）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: 打包并发布
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      # ---------- 版本号 ----------
+      - name: 确定版本号
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            V="${GITHUB_REF_NAME}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            V="${{ inputs.version }}"
+          else
+            V="v$(date -u +%Y.%m.%d)"
+          fi
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "版本号：${V}"
+
+      # ---------- 校验 ----------
+      - name: 校验站点文件
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f site/index.html ]; then
+            echo "::error::找不到 site/index.html，仓库结构不完整"
+            exit 1
+          fi
+          echo "HTML 页面数：$(find site -name '*.html' | wc -l)"
+          echo "文件总数：$(find site -type f | wc -l)"
+
+      # ---------- 打包站点 ----------
+      - name: 打包静态站点
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          OUT="NapCat-Docs-Archive-${VER}-site.zip"
+          cd site
+          zip -r -9 "../${OUT}" . \
+            -x '*.DS_Store' '*/.*' '*.map'
+          cd ..
+          echo "SITE_ZIP=${OUT}" >> "$GITHUB_ENV"
+          ls -lh "${OUT}"
+
+      # ---------- 打包 Markdown（可选）----------
+      - name: 打包 Markdown 归档
+        id: md
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          SRC=""
+          for f in "NapCat文档归档.md" "docs/NapCat文档归档.md" "NapCat-Docs.md"; do
+            if [ -f "$f" ]; then SRC="$f"; break; fi
+          done
+          if [ -z "${SRC}" ]; then
+            echo "未找到 Markdown 归档，跳过"
+            echo "has_md=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          OUT="NapCat-Docs-Archive-${VER}-markdown.zip"
+          zip -9 -j "${OUT}" "${SRC}"
+          echo "has_md=true" >> "$GITHUB_OUTPUT"
+          echo "MD_ZIP=${OUT}" >> "$GITHUB_ENV"
+          ls -lh "${OUT}"
+
+      # ---------- 校验和 ----------
+      - name: 生成 SHA256 校验和
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum *.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # ---------- 发布正文 ----------
+      - name: 生成发布说明
+        shell: bash
+        env:
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          PAGES=$(find site -name '*.html' | wc -l)
+          FILES=$(find site -type f | wc -l)
+          SIZE=$(du -sh site | cut -f1)
+          {
+            echo "## NapCat 文档归档 ${VER}"
+            echo
+            echo "> 源站 \`https://napneko.github.io\` 已下线，本包为 Wayback Machine 快照重建版。"
+            echo
+            echo "| 项目 | 数值 |"
+            echo "| --- | --- |"
+            echo "| HTML 页面 | ${PAGES} |"
+            echo "| 文件总数 | ${FILES} |"
+            echo "| 解压体积 | ${SIZE} |"
+            echo "| 快照基准 | 2026-10-27 |"
+            echo "| 构建时间 | $(date -u '+%Y-%m-%d %H:%M UTC') |"
+            echo
+            echo "### 使用方法"
+            echo
+            echo '解压 `*-site.zip`，双击 `index.html` 即可离线阅读；正文与样式已内联，无需服务器。'
+            echo
+            echo '> 站内搜索与主题切换依赖运行时 JS，未收录。正文、目录、代码块、图片均正常。'
+            echo
+            echo "### 文件"
+            echo
+            echo '- `*-site.zip` — 完整静态站点'
+            echo '- `*-markdown.zip` — 合并版纯文本（若存在）'
+            echo '- `SHA256SUMS.txt` — 校验和'
+            echo
+            echo "---"
+            echo
+            echo "文档版权归 NapCat 原作者所有，本仓库仅为技术存档，不含程序本体。"
+          } > release_body.md
+          cat release_body.md
+
+      # ---------- 创建 Release ----------
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: NapCat 文档归档 ${{ steps.ver.outputs.version }}
+          body_path: release_body.md
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+          files: |
+            *.zip
+            SHA256SUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # ---------- 归档产物 ----------
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: napcat-docs-archive-${{ steps.ver.outputs.version }}
+          path: |
+            *.zip
+            SHA256SUMS.txt
+          retention-days: 30
+          if-no-files-found: error

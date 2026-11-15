@@ -1,0 +1,4 @@
+*.zip
+release_body.md
+.DS_Store
+Thumbs.db

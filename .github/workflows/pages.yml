@@ -1,0 +1,81 @@
+name: Deploy Docs to Pages
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "site/**"
+      - "tools/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 构建站点
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 校验站点文件
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f site/index.html ]; then
+            echo "::error::找不到 site/index.html"
+            exit 1
+          fi
+          echo "HTML 页面数：$(find site -name '*.html' | wc -l)"
+          echo "文件总数：$(find site -type f | wc -l)"
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 把根路径绝对引用改成相对路径，保证子目录部署不 404
+      - name: 相对化资源路径
+        shell: bash
+        run: |
+          set -euo pipefail
+          python tools/relativize.py site
+
+      - name: 添加 .nojekyll
+        shell: bash
+        run: |
+          # 防止 Jekyll 忽略下划线开头的目录
+          touch site/.nojekyll
+
+      - name: 配置 Pages
+        uses: actions/configure-pages@v5
+
+      - name: 上传站点产物
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: 部署到 GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 部署
+        id: deployment
+        uses: actions/deploy-pages@v4
